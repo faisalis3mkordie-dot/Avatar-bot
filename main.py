@@ -78,12 +78,10 @@ def create_matching_card(avatar_img, banner_img):
   banner_w, banner_h = 730, 270
   avatar_size = 220
 
-  # خلفية ممتدة بالكامل من البانر
   bg = ImageOps.fit(banner_img, (W, H), Image.Resampling.LANCZOS)
   dark_overlay = Image.new('RGBA', (W, H), (8, 10, 14, 180))
   bg.paste(dark_overlay, (0, 0), dark_overlay)
 
-  # البانر الداخلي
   banner_crop = ImageOps.fit(
       banner_img, (banner_w, banner_h), Image.Resampling.LANCZOS
   )
@@ -95,7 +93,6 @@ def create_matching_card(avatar_img, banner_img):
 
   bg.paste(banner_crop, (banner_x, banner_y), banner_mask)
 
-  # إطار البانر
   draw_bg = ImageDraw.Draw(bg)
   draw_bg.rounded_rectangle(
       (banner_x - 2, banner_y - 2, banner_x + banner_w + 2, banner_y + banner_h + 2),
@@ -104,7 +101,6 @@ def create_matching_card(avatar_img, banner_img):
       radius=35,
   )
 
-  # الأفتار المتداخل
   avatar_crop = ImageOps.fit(
       avatar_img, (avatar_size, avatar_size), Image.Resampling.LANCZOS
   )
@@ -117,7 +113,6 @@ def create_matching_card(avatar_img, banner_img):
 
   bg.paste(avatar_crop, (avatar_x, avatar_y), circle_mask)
 
-  # إطار الأفتار
   draw_bg.ellipse(
       (
           avatar_x - 3,
@@ -132,49 +127,43 @@ def create_matching_card(avatar_img, banner_img):
   return bg
 
 
-# --- 5. استقبال الرسائل المعالجة بشكل آمن ---
-@bot.event
-async def on_message(message):
-  # الاستجابة فقط إذا أرسل العضو صوراً وكان المنشن للبوت أو استخدم !merge
-  if message.author.bot:
+# --- 5. أمر الدمج الرئيسي ---
+@bot.command(name='merge')
+async def merge(ctx):
+  if len(ctx.message.attachments) < 2:
+    await ctx.send(
+        '❌ يرجى إرفاق صورتين في نفس الرسالة! (الأولى للأفتار والثانية للبانر)'
+    )
     return
 
-  is_command = message.content.startswith('!merge')
-  is_mentioned = bot.user in message.mentions
+  async with aiohttp.ClientSession() as session:
+    async with session.get(ctx.message.attachments[0].url) as resp1:
+      avatar_data = await resp1.read()
+    async with session.get(ctx.message.attachments[1].url) as resp2:
+      banner_data = await resp2.read()
 
-  if (is_command or is_mentioned) and len(message.attachments) >= 2:
-    ctx = await bot.get_context(message)
+  # حذف رسالة العضو
+  try:
+    await ctx.message.delete()
+  except Exception:
+    pass
 
-    async with aiohttp.ClientSession() as session:
-      async with session.get(message.attachments[0].url) as resp1:
-        avatar_data = await resp1.read()
-      async with session.get(message.attachments[1].url) as resp2:
-        banner_data = await resp2.read()
+  avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
+  banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
 
-    # حذف رسالة المستخدم
-    try:
-      await message.delete()
-    except Exception:
-      pass
+  final_card = create_matching_card(avatar_img, banner_img)
 
-    avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
-    banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
+  output_buffer = io.BytesIO()
+  final_card.save(output_buffer, format='PNG')
+  output_buffer.seek(0)
 
-    final_card = create_matching_card(avatar_img, banner_img)
+  view = ProfileButtons(ctx.author.id, avatar_data, banner_data)
 
-    output_buffer = io.BytesIO()
-    final_card.save(output_buffer, format='PNG')
-    output_buffer.seek(0)
-
-    view = ProfileButtons(message.author.id, avatar_data, banner_data)
-
-    await message.channel.send(
-        content=f'**From:** {message.author.mention}',
-        file=discord.File(fp=output_buffer, filename='matching_profile.png'),
-        view=view,
-    )
-
-  await bot.process_commands(message)
+  await ctx.send(
+      content=f'**From:** {ctx.author.mention}',
+      file=discord.File(fp=output_buffer, filename='matching_profile.png'),
+      view=view,
+  )
 
 
 bot.run(os.getenv('BOT_TOKEN'))
