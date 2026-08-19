@@ -44,35 +44,19 @@ class ProfileButtons(View):
   async def download_btn(
       self, interaction: discord.Interaction, button: Button
   ):
-    # إبلاغ ديسكورد بالبدء لتجهيز الرد الخاص (Ephemeral)
     await interaction.response.defer(ephemeral=True)
 
-    img1 = Image.open(io.BytesIO(self.avatar_bytes)).convert('RGBA')
-    img2 = Image.open(io.BytesIO(self.banner_bytes)).convert('RGBA')
+    # تجهيز الملفين كملفات منفصلة ومستقلة
+    file1 = discord.File(
+        fp=io.BytesIO(self.avatar_bytes), filename='avatar.png'
+    )
+    file2 = discord.File(
+        fp=io.BytesIO(self.banner_bytes), filename='banner.png'
+    )
 
-    # ضبط الصورتين بمقاس مربع موحد بحواف دائرية (كما في الأصل)
-    size = (350, 350)
-    img1_cropped = ImageOps.fit(img1, size, Image.Resampling.LANCZOS)
-    img2_cropped = ImageOps.fit(img2, size, Image.Resampling.LANCZOS)
-
-    # قناع حواف دائرية للصور الأصلية
-    mask = Image.new('L', size, 0)
-    draw_m = ImageDraw.Draw(mask)
-    draw_m.rounded_rectangle((0, 0, 350, 350), radius=30, fill=255)
-
-    combined = Image.new('RGBA', (730, 350), (0, 0, 0, 0))
-    combined.paste(img1_cropped, (0, 0), mask)
-    combined.paste(img2_cropped, (380, 0), mask)
-
-    output = io.BytesIO()
-    combined.save(output, format='PNG')
-    output.seek(0)
-
-    # إرسال الصور الأصلية في رسالة مخفية تظهر لك فقط
+    # إرسال الصورتين كمرفقين منفصلين بنفس الرسالة المخفية
     await interaction.followup.send(
-        content='**صورك الأصلية:**',
-        file=discord.File(fp=output, filename='original_images.png'),
-        ephemeral=True,
+        content='**صورك الأصلية:**', files=[file1, file2], ephemeral=True
     )
 
   @discord.ui.button(
@@ -87,45 +71,36 @@ class ProfileButtons(View):
       )
 
 
-# --- 4. دالة رسم قالب Noir المطابق 100% ---
+# --- 4. دالة رسم قالب البروفايل ---
 def create_matching_card(avatar_img, banner_img):
   W, H = 850, 480
 
-  # قص الصور بمقاسات دقيقة
   banner_crop = ImageOps.fit(banner_img, (730, 300), Image.Resampling.LANCZOS)
   avatar_crop = ImageOps.fit(avatar_img, (210, 210), Image.Resampling.LANCZOS)
 
-  # خلفية داكنة ضبابية مأخوذة من صورة البانر
   bg = ImageOps.fit(banner_img, (W, H), Image.Resampling.LANCZOS)
   bg = bg.filter(ImageFilter.GaussianBlur(22))
 
-  # تعتيم ضبابي خلف القالب
   overlay = Image.new('RGBA', (W, H), (10, 12, 16, 175))
   bg.paste(overlay, (0, 0), overlay)
 
-  # قناع البانر المستطيل بحواف منحنية
   banner_mask = Image.new('L', (730, 300), 0)
   draw_bm = ImageDraw.Draw(banner_mask)
   draw_bm.rounded_rectangle((0, 0, 730, 300), radius=35, fill=255)
 
-  # وضع البانر
   bg.paste(banner_crop, (60, 50), banner_mask)
 
-  # رسم الإطار الزجاجي العريض للبانر
   draw_bg = ImageDraw.Draw(bg)
   draw_bg.rounded_rectangle(
       (57, 47, 793, 353), outline=(110, 140, 165, 230), width=4, radius=35
   )
 
-  # قناع الأفتار الدائري
   circle_mask = Image.new('L', (210, 210), 0)
   draw_cm = ImageDraw.Draw(circle_mask)
   draw_cm.ellipse((0, 0, 210, 210), fill=255)
 
-  # وضع دائرة الأفتار متداخلة مع البانر من اليسار
   bg.paste(avatar_crop, (100, 150), circle_mask)
 
-  # إطار أزرق رمادي سميك حول دائرة الأفتار
   draw_bg.ellipse(
       (96, 146, 314, 364), outline=(100, 130, 155, 255), width=6
   )
@@ -160,13 +135,12 @@ async def merge(ctx):
 
   view = ProfileButtons(ctx.author.id, avatar_data, banner_data)
 
-  # إرسال الكارت ومعه الأزرار والرمز الزخرفي السفلي
+  # إرسال الكارت ومعه الأزرار فقط بدون أي نصوص أو فواصل إضافية
   await ctx.send(
       content=f'**From:** {ctx.author.mention}',
       file=discord.File(fp=output_buffer, filename='matching_profile.png'),
       view=view,
   )
-  await ctx.send(content='༻𓏲⏝ Noir ⏝𓏲༺')
 
 
 bot.run(os.getenv('BOT_TOKEN'))
