@@ -24,11 +24,9 @@ def run():
 Thread(target=run).start()
 
 # --- 2. إعدادات البوت ---
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-
+bot = commands.Bot(
+    command_prefix=commands.when_mentioned_or('!'), intents=intents
+)
 # --- 3. أزرار التفاعل (تنزيل وحذف) ---
 class ProfileButtons(View):
 
