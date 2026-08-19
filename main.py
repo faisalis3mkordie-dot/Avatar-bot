@@ -8,13 +8,13 @@ from discord.ui import Button, View
 from flask import Flask
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
-# --- 1. سيرفر Flask للبقاء أونلاين ---
+# --- سيرفر Flask ---
 app = Flask('')
 
 
 @app.route('/')
 def home():
-  return 'Bot is online!'
+  return 'Bot Online'
 
 
 def run():
@@ -23,16 +23,11 @@ def run():
 
 Thread(target=run).start()
 
-# --- 2. إعدادات البوت ---
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(
-    command_prefix=commands.when_mentioned_or('!'), intents=intents
-)
+# --- إعدادات البوت ---
+intents = discord.Intents.all()  # تفعيل جميع الصلاحيات لتفادي أي حجب
+bot = commands.Bot(command_prefix='!', intents=intents)
 
 
-# --- 3. أزرار التفاعل (تنزيل وحذف) ---
 class ProfileButtons(View):
 
   def __init__(self, author_id, avatar_bytes, banner_bytes):
@@ -48,14 +43,12 @@ class ProfileButtons(View):
       self, interaction: discord.Interaction, button: Button
   ):
     await interaction.response.defer(ephemeral=True)
-
     file1 = discord.File(
         fp=io.BytesIO(self.avatar_bytes), filename='avatar.png'
     )
     file2 = discord.File(
         fp=io.BytesIO(self.banner_bytes), filename='banner.png'
     )
-
     await interaction.followup.send(
         content='**صورك الأصلية:**', files=[file1, file2], ephemeral=True
     )
@@ -72,7 +65,6 @@ class ProfileButtons(View):
       )
 
 
-# --- 4. دالة رسم قالب البروفايل (الخلفية الممتدة) ---
 def create_matching_card(avatar_img, banner_img):
   W, H = 850, 480
   banner_w, banner_h = 730, 270
@@ -127,43 +119,46 @@ def create_matching_card(avatar_img, banner_img):
   return bg
 
 
-# --- 5. أمر الدمج الرئيسي ---
-@bot.command(name='merge')
-async def merge(ctx):
-  if len(ctx.message.attachments) < 2:
-    await ctx.send(
-        '❌ يرجى إرفاق صورتين في نفس الرسالة! (الأولى للأفتار والثانية للبانر)'
-    )
+@bot.event
+async def on_ready():
+  print(f'Bot is ready: {bot.user}')
+
+
+@bot.event
+async def on_message(message):
+  if message.author.bot:
     return
 
-  async with aiohttp.ClientSession() as session:
-    async with session.get(ctx.message.attachments[0].url) as resp1:
-      avatar_data = await resp1.read()
-    async with session.get(ctx.message.attachments[1].url) as resp2:
-      banner_data = await resp2.read()
+  # فحص وجود صور في الرسالة
+  if len(message.attachments) >= 2:
+    # الاستجابة إذا أرسل العضو كلمة merge أو منشن البوت أو أرسل الصور فقط
+    async with aiohttp.ClientSession() as session:
+      async with session.get(message.attachments[0].url) as resp1:
+        avatar_data = await resp1.read()
+      async with session.get(message.attachments[1].url) as resp2:
+        banner_data = await resp2.read()
 
-  # حذف رسالة العضو
-  try:
-    await ctx.message.delete()
-  except Exception:
-    pass
+    try:
+      await message.delete()
+    except Exception:
+      pass
 
-  avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
-  banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
+    avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
+    banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
 
-  final_card = create_matching_card(avatar_img, banner_img)
+    final_card = create_matching_card(avatar_img, banner_img)
 
-  output_buffer = io.BytesIO()
-  final_card.save(output_buffer, format='PNG')
-  output_buffer.seek(0)
+    output_buffer = io.BytesIO()
+    final_card.save(output_buffer, format='PNG')
+    output_buffer.seek(0)
 
-  view = ProfileButtons(ctx.author.id, avatar_data, banner_data)
+    view = ProfileButtons(message.author.id, avatar_data, banner_data)
 
-  await ctx.send(
-      content=f'**From:** {ctx.author.mention}',
-      file=discord.File(fp=output_buffer, filename='matching_profile.png'),
-      view=view,
-  )
+    await message.channel.send(
+        content=f'**From:** {message.author.mention}',
+        file=discord.File(fp=output_buffer, filename='matching_profile.png'),
+        view=view,
+    )
 
 
 bot.run(os.getenv('BOT_TOKEN'))
