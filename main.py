@@ -29,25 +29,49 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
-# --- 3. أزرار التحكم المصغرة ---
+# --- 3. أزرار التفاعل مع حفظ الصور الأصلية ---
 class ProfileButtons(View):
 
-  def __init__(self, author_id):
+  def __init__(self, author_id, avatar_bytes, banner_bytes):
     super().__init__(timeout=None)
     self.author_id = author_id
+    self.avatar_bytes = avatar_bytes
+    self.banner_bytes = banner_bytes
 
   @discord.ui.button(
-      label='📥', style=discord.ButtonStyle.secondary, custom_id='download_btn'
+      emoji='📥', style=discord.ButtonStyle.secondary, custom_id='download_btn'
   )
   async def download_btn(
       self, interaction: discord.Interaction, button: Button
   ):
-    await interaction.response.send_message(
-        'تم التنزيل بنجاح!', ephemeral=True
+    # إبلاغ ديسكورد بالمعالجة
+    await interaction.response.defer(ephemeral=False)
+
+    img1 = Image.open(io.BytesIO(self.avatar_bytes)).convert('RGBA')
+    img2 = Image.open(io.BytesIO(self.banner_bytes)).convert('RGBA')
+
+    # توحيد الارتفاع للصور الأصلية لدمجهما جنبًا إلى جنب
+    h = min(img1.height, img2.height)
+    img1_resized = img1.resize((int(img1.width * h / img1.height), h))
+    img2_resized = img2.resize((int(img2.width * h / img2.height), h))
+
+    # دمج الصورتين في صورة واحدة
+    combined = Image.new('RGBA', (img1_resized.width + img2_resized.width, h))
+    combined.paste(img1_resized, (0, 0))
+    combined.paste(img2_resized, (img1_resized.width, 0))
+
+    output = io.BytesIO()
+    combined.save(output, format='PNG')
+    output.seek(0)
+
+    # إرسال رد كـ Reply بنفس الطريقة الظاهرة في الصورة
+    await interaction.followup.send(
+        content='**صورك الأصلية:**',
+        file=discord.File(fp=output, filename='original_images.png'),
     )
 
   @discord.ui.button(
-      label='🗑️', style=discord.ButtonStyle.secondary, custom_id='delete_btn'
+      emoji='🗑️', style=discord.ButtonStyle.secondary, custom_id='delete_btn'
   )
   async def delete_btn(self, interaction: discord.Interaction, button: Button):
     if interaction.user.id == self.author_id:
@@ -58,48 +82,37 @@ class ProfileButtons(View):
       )
 
 
-# --- 4. دالة رسم قالب البروفايل بالملي ---
+# --- 4. تصميم قالب البروفايل ---
 def create_matching_card(avatar_img, banner_img):
-  # المقاس الكلي للكارت
-  W, H = 800, 480
+  W, H = 800, 420
 
-  # تجهيز الصورة الأولى (الأفتار) والتصغير
-  avatar_crop = ImageOps.fit(avatar_img, (220, 220), Image.Resampling.LANCZOS)
-  banner_crop = ImageOps.fit(banner_img, (580, 210), Image.Resampling.LANCZOS)
+  banner_crop = ImageOps.fit(banner_img, (600, 220), Image.Resampling.LANCZOS)
+  avatar_crop = ImageOps.fit(avatar_img, (160, 160), Image.Resampling.LANCZOS)
 
-  # خلفية ضبابية مموهة من صورة البانر
   bg = ImageOps.fit(banner_img, (W, H), Image.Resampling.LANCZOS)
-  bg = bg.filter(ImageFilter.GaussianBlur(15))
+  bg = bg.filter(ImageFilter.GaussianBlur(18))
 
-  # طبقة سوداء شفافة لتعتيم الخلفية
-  overlay = Image.new('RGBA', (W, H), (15, 18, 22, 160))
+  overlay = Image.new('RGBA', (W, H), (15, 18, 22, 170))
   bg.paste(overlay, (0, 0), overlay)
 
-  # رسم الإطار الزجاجي الداخلي للبانر بحواف دائرية
-  banner_mask = Image.new('L', (580, 210), 0)
+  banner_mask = Image.new('L', (600, 220), 0)
   draw_bm = ImageDraw.Draw(banner_mask)
-  draw_bm.rounded_rectangle((0, 0, 580, 210), radius=25, fill=255)
+  draw_bm.rounded_rectangle((0, 0, 600, 220), radius=20, fill=255)
 
-  # لصق البانر داخل الكارت
-  bg.paste(banner_crop, (170, 70), banner_mask)
+  bg.paste(banner_crop, (100, 50), banner_mask)
 
-  # إطار أزرق رمادي حول البانر
   draw_bg = ImageDraw.Draw(bg)
   draw_bg.rounded_rectangle(
-      (168, 68, 752, 282), outline=(100, 130, 160, 255), width=3, radius=25
+      (98, 48, 702, 272), outline=(100, 130, 160, 255), width=3, radius=20
   )
 
-  # تجهيز الأفتار بشكل دائري
-  circle_mask = Image.new('L', (220, 220), 0)
+  circle_mask = Image.new('L', (160, 160), 0)
   draw_cm = ImageDraw.Draw(circle_mask)
-  draw_cm.ellipse((0, 0, 220, 220), fill=255)
+  draw_cm.ellipse((0, 0, 160, 160), fill=255)
 
-  # لصق الأفتار
-  bg.paste(avatar_crop, (80, 120), circle_mask)
-
-  # إطار أزرق رمادي حول الأفتار
+  bg.paste(avatar_crop, (140, 170), circle_mask)
   draw_bg.ellipse(
-      (77, 117, 303, 343), outline=(100, 130, 160, 255), width=4
+      (137, 167, 303, 333), outline=(100, 130, 160, 255), width=4
   )
 
   return bg
@@ -115,10 +128,9 @@ async def merge(ctx):
     return
 
   async with aiohttp.ClientSession() as session:
-    # الصورة الأولى 0 = الأفتار
+    # الصورة 0 = أفتار | الصورة 1 = بانر
     async with session.get(ctx.message.attachments[0].url) as resp1:
       avatar_data = await resp1.read()
-    # الصورة الثانية 1 = البانر
     async with session.get(ctx.message.attachments[1].url) as resp2:
       banner_data = await resp2.read()
 
@@ -131,17 +143,14 @@ async def merge(ctx):
   final_card.save(output_buffer, format='PNG')
   output_buffer.seek(0)
 
-  view = ProfileButtons(ctx.author.id)
+  # نمرر بيانات الصور الأصلية للأزرار لتنزيلها لاحقاً
+  view = ProfileButtons(ctx.author.id, avatar_data, banner_data)
 
-  # إرسال النتيجة مع الخط الفاصل والأزرار
   await ctx.send(
       content=f'**From:** {ctx.author.mention}',
-      file=discord.File(fp=output_buffer, filename='matching_profile.png'),
+      file=discord.File(fp=output_buffer, filename='profile.png'),
       view=view,
   )
-  await ctx.send(content='༻𓏲```python
-  await ctx.send(content='༻𓏲```python
-  await ctx.send(content='༻𓏲⏝ Noir ⏝𓏲༺')
 
 
 bot.run(os.getenv('BOT_TOKEN'))
