@@ -4,10 +4,11 @@ from threading import Thread
 import aiohttp
 import discord
 from discord.ext import commands
+from discord.ui import Button, View
 from flask import Flask
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
-# --- 1. سيرفر وهمي لتجاوز فحص البورت مجاناً في Render ---
+# --- 1. سيرفر Flask للبقاء أونلاين ---
 app = Flask('')
 
 
@@ -22,52 +23,86 @@ def run():
 
 Thread(target=run).start()
 
-# --- 2. إعدادات البوت والـ Intents ---
+# --- 2. إعدادات البوت ---
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
-@bot.event
-async def on_ready():
-  print(f'Logged in as {bot.user}')
+# --- 3. أزرار التنزيل والحذف ---
+class ProfileButtons(View):
+
+  def __init__(self, author_id):
+    super().__init__(timeout=None)
+    self.author_id = author_id
+
+  @discord.ui.button(label='تنزيل 📥', style=discord.ButtonStyle.primary)
+  async def download_btn(
+      self, interaction: discord.Interaction, button: Button
+  ):
+    await interaction.response.send_message(
+        'تم التنزيل بنجاح!', ephemeral=True
+    )
+
+  @discord.ui.button(label='🗑️', style=discord.ButtonStyle.danger)
+  async def delete_btn(self, interaction: discord.Interaction, button: Button):
+    if interaction.user.id == self.author_id:
+      await interaction.message.delete()
+    else:
+      await interaction.response.send_message(
+        '❌ يمكنك حذف التصميم الخاص بك فقط!', ephemeral=True
+      )
 
 
-# --- 3. أمر دمج الصورتين !merge ---
+# --- 4. أمر دمج الأفتار مع البانر !merge ---
 @bot.command()
 async def merge(ctx):
   if len(ctx.message.attachments) < 2:
-    await ctx.send('❌ يرجى إرفاق صورتين في نفس الرسالة مع الأمر!')
+    await ctx.send('❌ يرجى إرفاق صورتين (الأولى للبانر والثانية للأفتار)!')
     return
 
   async with aiohttp.ClientSession() as session:
     async with session.get(ctx.message.attachments[0].url) as resp1:
-      img1_data = await resp1.read()
+      banner_data = await resp1.read()
     async with session.get(ctx.message.attachments[1].url) as resp2:
-      img2_data = await resp2.read()
+      avatar_data = await resp2.read()
 
-  img1 = Image.open(io.BytesIO(img1_data)).convert('RGBA')
-  img2 = Image.open(io.BytesIO(img2_data)).convert('RGBA')
+  banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
+  avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
 
-  # قص وتصغير الصورتين بمقاس مربع موحد (300x300) لتجنب المط والتشويه
-  target_size = (300, 300)
-  img1 = ImageOps.fit(img1, target_size, Image.Resampling.LANCZOS)
-  img2 = ImageOps.fit(img2, target_size, Image.Resampling.LANCZOS)
+  # إنشاء خلفية تصميم البروفايل (سوداء مع حواف دائرية)
+  canvas_w, canvas_h = 600, 350
+  base = Image.new('RGBA', (canvas_w, canvas_h), (18, 18, 18, 255))
 
-  # دمج الصورتين جنباً إلى جنب
-  new_img = Image.new('RGBA', (600, 300))
-  new_img.paste(img1, (0, 0))
-  new_img.paste(img2, (300, 0))
+  # تجهيز البانر وتصغيره
+  banner_resized = ImageOps.fit(
+      banner_img, (540, 200), Image.Resampling.LANCZOS
+  )
+  base.paste(banner_resized, (30, 30))
+
+  # تجهيز الأفتار بشكل دائري
+  avatar_size = 130
+  avatar_resized = ImageOps.fit(
+      avatar_img, (avatar_size, avatar_size), Image.Resampling.LANCZOS
+  )
+
+  mask = Image.new('L', (avatar_size, avatar_size), 0)
+  draw = ImageDraw.Draw(mask)
+  draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
+
+  # وضع الأفتار بشكل متداخل فوق البانر
+  base.paste(avatar_resized, (60, 160), mask)
 
   output_buffer = io.BytesIO()
-  new_img.save(output_buffer, format='PNG')
+  base.save(output_buffer, format='PNG')
   output_buffer.seek(0)
 
+  view = ProfileButtons(ctx.author.id)
   await ctx.send(
-      file=discord.File(fp=output_buffer, filename='merged_avatar.png')
+      content=f'**From:** {ctx.author.mention}',
+      file=discord.File(fp=output_buffer, filename='profile.png'),
+      view=view,
   )
 
 
-# --- 4. تشغيل البوت ---
 bot.run(os.getenv('BOT_TOKEN'))
