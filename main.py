@@ -27,23 +27,23 @@ Thread(target=run).start()
 intents = discord.Intents.all()
 
 
-# --- 3. أزرار التفاعل الدائمة (Persistent View) ---
+# --- 3. زر التفاعل الدائم (تحميل فقط) ---
 class ProfileButtons(View):
 
   def __init__(self):
-    super().__init__(timeout=None)  # يجعل الواجهة لا تنتهي صلاحيتها أبداً
+    super().__init__(timeout=None)
 
   @discord.ui.button(
       emoji='📥',
       style=discord.ButtonStyle.secondary,
-      custom_id='persistent_download_btn',
+      custom_id='persistent_download_btn_v3',
   )
   async def download_btn(
       self, interaction: discord.Interaction, button: Button
   ):
+    # إبلاغ ديسكورد فوراً باستلام الطلب لمنع أي تأخير
     await interaction.response.defer(ephemeral=True)
 
-    # جلب المرفقات الأصلية مباشرة من الرسالة نفسها
     if interaction.message.attachments:
       files = []
       for idx, att in enumerate(interaction.message.attachments):
@@ -57,28 +57,11 @@ class ProfileButtons(View):
             )
 
       await interaction.followup.send(
-          content='**الصورة المصممة:**', files=files, ephemeral=True
+          content='**الصورة المصممة الأصلية:**', files=files, ephemeral=True
       )
     else:
       await interaction.followup.send(
           content='❌ تعذر العثور على الصور.', ephemeral=True
-      )
-
-  @discord.ui.button(
-      emoji='🗑️',
-      style=discord.ButtonStyle.secondary,
-      custom_id='persistent_delete_btn',
-  )
-  async def delete_btn(self, interaction: discord.Interaction, button: Button):
-    # السماح لصاحب الرسالة أو لمن يمتلك صلاحية إدارة الرسائل بحذفها
-    if (
-        interaction.user.mention in interaction.message.content
-        or interaction.user.guild_permissions.manage_messages
-    ):
-      await interaction.message.delete()
-    else:
-      await interaction.response.send_message(
-          '❌ يمكنك حذف تصميمك فقط!', ephemeral=True
       )
 
 
@@ -88,7 +71,7 @@ class PersistentBot(commands.Bot):
     super().__init__(command_prefix='!', intents=intents)
 
   async def setup_hook(self):
-    # تسجيل الواجهة لتظل الأزرار شغالة حتى بعد ريستارت البوت
+    # تسجيل الزر عند بدء التشغيل ليبقى شغالاً دائماً
     self.add_view(ProfileButtons())
 
 
@@ -150,7 +133,7 @@ def create_matching_card(avatar_img, banner_img):
   return bg
 
 
-# --- 5. استقبال الرسائل ---
+# --- 5. استقبال وتجهيز الرسائل ---
 @bot.event
 async def on_message(message):
   if message.author.bot:
