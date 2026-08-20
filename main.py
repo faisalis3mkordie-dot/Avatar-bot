@@ -27,7 +27,7 @@ Thread(target=run).start()
 intents = discord.Intents.all()
 
 
-# --- 3. زر التفاعل الدائم (تحميل فقط) ---
+# --- 3. زر التفاعل الدائم ---
 class ProfileButtons(View):
 
   def __init__(self):
@@ -36,32 +36,52 @@ class ProfileButtons(View):
   @discord.ui.button(
       emoji='📥',
       style=discord.ButtonStyle.secondary,
-      custom_id='persistent_download_btn_v3',
+      custom_id='persistent_download_btn_v4',
   )
   async def download_btn(
       self, interaction: discord.Interaction, button: Button
   ):
-    # إبلاغ ديسكورد فوراً باستلام الطلب لمنع أي تأخير
     await interaction.response.defer(ephemeral=True)
 
-    if interaction.message.attachments:
+    # البحث عن الصور الأصلية من الرسالة المرجعية أو الشات
+    referenced_msg = interaction.message.reference
+    target_msg = None
+
+    if referenced_msg and referenced_msg.message_id:
+      try:
+        target_msg = await interaction.channel.fetch_message(
+            referenced_msg.message_id
+        )
+      except Exception:
+        pass
+
+    if not target_msg or len(target_msg.attachments) < 2:
+      async for msg in interaction.channel.history(limit=10):
+        if len(msg.attachments) >= 2 and msg.author.id != interaction.client.user.id:
+          target_msg = msg
+          break
+
+    if target_msg and len(target_msg.attachments) >= 2:
       files = []
-      for idx, att in enumerate(interaction.message.attachments):
-        async with aiohttp.ClientSession() as session:
+      async with aiohttp.ClientSession() as session:
+        for idx, att in enumerate(target_msg.attachments[:2]):
           async with session.get(att.url) as resp:
             data = await resp.read()
             files.append(
                 discord.File(
-                    fp=io.BytesIO(data), filename=f'image_{idx+1}.png'
+                    fp=io.BytesIO(data), filename=f'original_{idx+1}.png'
                 )
             )
 
       await interaction.followup.send(
-          content='**الصورة المصممة الأصلية:**', files=files, ephemeral=True
+          content='**الصور الأصلية التي أرسلتها:**',
+          files=files,
+          ephemeral=True,
       )
     else:
       await interaction.followup.send(
-          content='❌ تعذر العثور على الصور.', ephemeral=True
+          content='❌ تعذر العثور على الصور الأصلية في الشات.',
+          ephemeral=True,
       )
 
 
@@ -71,7 +91,6 @@ class PersistentBot(commands.Bot):
     super().__init__(command_prefix='!', intents=intents)
 
   async def setup_hook(self):
-    # تسجيل الزر عند بدء التشغيل ليبقى شغالاً دائماً
     self.add_view(ProfileButtons())
 
 
@@ -158,11 +177,6 @@ async def on_message(message):
         async with session.get(target_attachments[1].url) as resp2:
           banner_data = await resp2.read()
 
-      try:
-        await message.delete()
-      except Exception:
-        pass
-
       avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
       banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
 
@@ -176,6 +190,7 @@ async def on_message(message):
           content=f'**From:** {message.author.mention}',
           file=discord.File(fp=output_buffer, filename='matching_profile.png'),
           view=ProfileButtons(),
+          reference=message,
       )
 
 
