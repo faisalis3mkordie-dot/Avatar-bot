@@ -8,7 +8,7 @@ from discord.ui import Button, View
 from flask import Flask
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
-# --- سيرفر Flask ---
+# --- 1. سيرفر Flask للبقاء أونلاين ---
 app = Flask('')
 
 
@@ -23,41 +23,58 @@ def run():
 
 Thread(target=run).start()
 
-# --- إعدادات البوت ---
-intents = discord.Intents.all()  # تفعيل جميع الصلاحيات لتفادي أي حجب
-bot = commands.Bot(command_prefix='!', intents=intents)
+# --- 2. إعدادات البوت ---
+intents = discord.Intents.all()
 
 
+# --- 3. أزرار التفاعل الدائمة (Persistent View) ---
 class ProfileButtons(View):
 
-  def __init__(self, author_id, avatar_bytes, banner_bytes):
-    super().__init__(timeout=None)
-    self.author_id = author_id
-    self.avatar_bytes = avatar_bytes
-    self.banner_bytes = banner_bytes
+  def __init__(self):
+    super().__init__(timeout=None)  # يجعل الواجهة لا تنتهي صلاحيتها أبداً
 
   @discord.ui.button(
-      emoji='📥', style=discord.ButtonStyle.secondary, custom_id='download_btn'
+      emoji='📥',
+      style=discord.ButtonStyle.secondary,
+      custom_id='persistent_download_btn',
   )
   async def download_btn(
       self, interaction: discord.Interaction, button: Button
   ):
     await interaction.response.defer(ephemeral=True)
-    file1 = discord.File(
-        fp=io.BytesIO(self.avatar_bytes), filename='avatar.png'
-    )
-    file2 = discord.File(
-        fp=io.BytesIO(self.banner_bytes), filename='banner.png'
-    )
-    await interaction.followup.send(
-        content='**صورك الأصلية:**', files=[file1, file2], ephemeral=True
-    )
+
+    # جلب المرفقات الأصلية مباشرة من الرسالة نفسها
+    if interaction.message.attachments:
+      files = []
+      for idx, att in enumerate(interaction.message.attachments):
+        async with aiohttp.ClientSession() as session:
+          async with session.get(att.url) as resp:
+            data = await resp.read()
+            files.append(
+                discord.File(
+                    fp=io.BytesIO(data), filename=f'image_{idx+1}.png'
+                )
+            )
+
+      await interaction.followup.send(
+          content='**الصورة المصممة:**', files=files, ephemeral=True
+      )
+    else:
+      await interaction.followup.send(
+          content='❌ تعذر العثور على الصور.', ephemeral=True
+      )
 
   @discord.ui.button(
-      emoji='🗑️', style=discord.ButtonStyle.secondary, custom_id='delete_btn'
+      emoji='🗑️',
+      style=discord.ButtonStyle.secondary,
+      custom_id='persistent_delete_btn',
   )
   async def delete_btn(self, interaction: discord.Interaction, button: Button):
-    if interaction.user.id == self.author_id:
+    # السماح لصاحب الرسالة أو لمن يمتلك صلاحية إدارة الرسائل بحذفها
+    if (
+        interaction.user.mention in interaction.message.content
+        or interaction.user.guild_permissions.manage_messages
+    ):
       await interaction.message.delete()
     else:
       await interaction.response.send_message(
@@ -65,6 +82,20 @@ class ProfileButtons(View):
       )
 
 
+class PersistentBot(commands.Bot):
+
+  def __init__(self):
+    super().__init__(command_prefix='!', intents=intents)
+
+  async def setup_hook(self):
+    # تسجيل الواجهة لتظل الأزرار شغالة حتى بعد ريستارت البوت
+    self.add_view(ProfileButtons())
+
+
+bot = PersistentBot()
+
+
+# --- 4. دالة الرسم ---
 def create_matching_card(avatar_img, banner_img):
   W, H = 850, 480
   banner_w, banner_h = 730, 270
@@ -119,46 +150,50 @@ def create_matching_card(avatar_img, banner_img):
   return bg
 
 
-@bot.event
-async def on_ready():
-  print(f'Bot is ready: {bot.user}')
-
-
+# --- 5. استقبال الرسائل ---
 @bot.event
 async def on_message(message):
   if message.author.bot:
     return
 
-  # فحص وجود صور في الرسالة
-  if len(message.attachments) >= 2:
-    # الاستجابة إذا أرسل العضو كلمة merge أو منشن البوت أو أرسل الصور فقط
-    async with aiohttp.ClientSession() as session:
-      async with session.get(message.attachments[0].url) as resp1:
-        avatar_data = await resp1.read()
-      async with session.get(message.attachments[1].url) as resp2:
-        banner_data = await resp2.read()
+  is_command = message.content.startswith('!merge')
+  is_mentioned = bot.user in message.mentions
 
-    try:
-      await message.delete()
-    except Exception:
-      pass
+  if is_command or is_mentioned:
+    target_attachments = message.attachments
 
-    avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
-    banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
+    if len(target_attachments) < 2:
+      async for msg in message.channel.history(limit=5):
+        if len(msg.attachments) >= 2:
+          target_attachments = msg.attachments
+          break
 
-    final_card = create_matching_card(avatar_img, banner_img)
+    if len(target_attachments) >= 2:
+      async with aiohttp.ClientSession() as session:
+        async with session.get(target_attachments[0].url) as resp1:
+          avatar_data = await resp1.read()
+        async with session.get(target_attachments[1].url) as resp2:
+          banner_data = await resp2.read()
 
-    output_buffer = io.BytesIO()
-    final_card.save(output_buffer, format='PNG')
-    output_buffer.seek(0)
+      try:
+        await message.delete()
+      except Exception:
+        pass
 
-    view = ProfileButtons(message.author.id, avatar_data, banner_data)
+      avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
+      banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
 
-    await message.channel.send(
-        content=f'**From:** {message.author.mention}',
-        file=discord.File(fp=output_buffer, filename='matching_profile.png'),
-        view=view,
-    )
+      final_card = create_matching_card(avatar_img, banner_img)
+
+      output_buffer = io.BytesIO()
+      final_card.save(output_buffer, format='PNG')
+      output_buffer.seek(0)
+
+      await message.channel.send(
+          content=f'**From:** {message.author.mention}',
+          file=discord.File(fp=output_buffer, filename='matching_profile.png'),
+          view=ProfileButtons(),
+      )
 
 
 bot.run(os.getenv('BOT_TOKEN'))
