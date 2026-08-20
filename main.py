@@ -36,19 +36,36 @@ class ProfileButtons(View):
   @discord.ui.button(
       emoji='📥',
       style=discord.ButtonStyle.secondary,
-      custom_id='persistent_download_btn_v5',
+      custom_id='persistent_download_btn_v6',
   )
   async def download_btn(
       self, interaction: discord.Interaction, button: Button
   ):
     await interaction.response.defer(ephemeral=True)
 
-    # جلب الصورتين الأصليتين المرفقتين بالرسالة
-    if len(interaction.message.attachments) >= 3:
+    # جلب رابطي الصورتين الأصليتين من الرسالة المرجعية (إذا كانت موجودة) أو البحث في آخر الرسائل
+    ref_msg = interaction.message.reference
+    target_msg = None
+
+    if ref_msg and ref_msg.message_id:
+      try:
+        target_msg = await interaction.channel.fetch_message(ref_msg.message_id)
+      except Exception:
+        pass
+
+    # إذا كانت الرسالة مسحوبة أو غير موجودة، نبحث عن أقرب رسالة فيها مرفقات قبل رسالة البوت
+    if not target_msg or len(target_msg.attachments) < 2:
+      async for msg in interaction.channel.history(
+          limit=10, before=interaction.message
+      ):
+        if len(msg.attachments) >= 2:
+          target_msg = msg
+          break
+
+    if target_msg and len(target_msg.attachments) >= 2:
       files = []
       async with aiohttp.ClientSession() as session:
-        # المرفق الثاني والثالث هما الصورتان الأصليتان
-        for idx, att in enumerate(interaction.message.attachments[1:3]):
+        for idx, att in enumerate(target_msg.attachments[:2]):
           async with session.get(att.url) as resp:
             data = await resp.read()
             files.append(
@@ -58,11 +75,11 @@ class ProfileButtons(View):
             )
 
       await interaction.followup.send(
-          content='**الصور الأصلية:**', files=files, ephemeral=True
+          content='**صورك الأصلية:**', files=files, ephemeral=True
       )
     else:
       await interaction.followup.send(
-          content='❌ تعذر العثور على الصور.', ephemeral=True
+          content='❌ تعذر العثور على الصور الأصلية.', ephemeral=True
       )
 
 
@@ -108,7 +125,8 @@ def create_matching_card(avatar_img, banner_img):
   )
 
   avatar_crop = ImageOps.fit(
-      avatar_img, (avatar_size, avatar_size), Image.Resampling.LANCZOS)
+      avatar_img, (avatar_size, avatar_size), Image.Resampling.LANCZOS
+  )
   avatar_x = 110
   avatar_y = (banner_y + banner_h) - (avatar_size // 2)
 
@@ -146,7 +164,7 @@ async def on_message(message):
 
     if len(target_attachments) < 2:
       async for msg in message.channel.history(limit=5):
-        if len(msg.attachments) >= 2:
+        if len(msg.attachments) >= 2 and msg.author.id != bot.user.id:
           target_attachments = msg.attachments
           break
 
@@ -157,11 +175,6 @@ async def on_message(message):
         async with session.get(target_attachments[1].url) as resp2:
           banner_data = await resp2.read()
 
-      try:
-        await message.delete()
-      except Exception:
-        pass
-
       avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
       banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
 
@@ -171,21 +184,12 @@ async def on_message(message):
       final_card.save(output_buffer, format='PNG')
       output_buffer.seek(0)
 
-      # إرسال الصورة المصممة ومعها الصورتان الأصلية في نفس الرسالة
-      file_main = discord.File(
-          fp=output_buffer, filename='matching_profile.png'
-      )
-      file_orig1 = discord.File(
-          fp=io.BytesIO(avatar_data), filename='original_avatar.png'
-      )
-      file_orig2 = discord.File(
-          fp=io.BytesIO(banner_data), filename='original_banner.png'
-      )
-
+      # إرسال الصورة المصممة فقط بدون حذف رسالة المستخدم
       await message.channel.send(
           content=f'**From:** {message.author.mention}',
-          files=[file_main, file_orig1, file_orig2],
+          file=discord.File(fp=output_buffer, filename='matching_profile.png'),
           view=ProfileButtons(),
+          reference=message,
       )
 
 
