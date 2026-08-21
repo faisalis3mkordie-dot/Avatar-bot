@@ -162,7 +162,6 @@ class PersistentResultButtons(discord.ui.View):
         del button
         await interaction.response.defer(ephemeral=True)
 
-        # 1. إذا كانت الصور موجودة في ذاكرة البوت (قبل الرستارت)
         if self.originals:
             files = [
                 discord.File(io.BytesIO(img_bytes), filename=fname)
@@ -175,7 +174,6 @@ class PersistentResultButtons(discord.ui.View):
                 await interaction.followup.send("⚠️ خاصك مقفل! يرجى فتح الرسائل الخاصة (DMs) لكي نتمكن من إرسال الصور لك.", ephemeral=True)
             return
 
-        # 2. في حال الضغط على الزر بعد إعادة تشغيل البوت (إرسال التصميم المرفق في الرسالة)
         if interaction.message and interaction.message.attachments:
             result_file = await interaction.message.attachments[0].to_file()
             try:
@@ -224,7 +222,6 @@ async def send_result(
     )
     view = PersistentResultButtons(original_pairs)
 
-    # إرسال الصورة والزر مباشرة في الروم
     await send_func(
         content=f"**From:** {author_mention}",
         file=file_to_send,
