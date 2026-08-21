@@ -150,7 +150,7 @@ class PersistentResultButtons(discord.ui.View):
         self.originals = list(originals) if originals else []
 
     @discord.ui.button(
-        label="⤓  تنزيل الصور الأصلية",
+        label="⤓  تنزيل الصور",
         style=discord.ButtonStyle.secondary,
         custom_id="merge:persistent_download",
     )
@@ -162,25 +162,27 @@ class PersistentResultButtons(discord.ui.View):
         del button
         await interaction.response.defer(ephemeral=True)
 
+        # 1. إذا كانت الصور موجودة في ذاكرة البوت (قبل الرستارت)
         if self.originals:
             files = [
                 discord.File(io.BytesIO(img_bytes), filename=fname)
                 for img_bytes, fname in self.originals
             ]
             try:
-                await interaction.user.send("📂 هذه هي الصور الأصلية التي استخدمتها:", files=files)
+                await interaction.user.send("📂 هذه هي الصور الأصلية:", files=files)
                 await interaction.followup.send("✅ تم إرسال الصور الأصلية إلى خاصك!", ephemeral=True)
             except discord.Forbidden:
-                await interaction.followup.send("⚠️ تعذر إرسال الصور! يرجى فتح الرسائل الخاصة (DMs) أولاً.", ephemeral=True)
+                await interaction.followup.send("⚠️ خاصك مقفل! يرجى فتح الرسائل الخاصة (DMs) لكي نتمكن من إرسال الصور لك.", ephemeral=True)
             return
 
+        # 2. في حال الضغط على الزر بعد إعادة تشغيل البوت (إرسال التصميم المرفق في الرسالة)
         if interaction.message and interaction.message.attachments:
             result_file = await interaction.message.attachments[0].to_file()
             try:
-                await interaction.user.send("🎨 تصميمك المحفوظ:", file=result_file)
-                await interaction.followup.send("✅ تم إرسال تصميمك في الخاص!", ephemeral=True)
+                await interaction.user.send("🎨 التصميم المحفوظ:", file=result_file)
+                await interaction.followup.send("✅ تم إرسال التصميم إلى خاصك!", ephemeral=True)
             except discord.Forbidden:
-                await interaction.followup.send("⚠️ يرجى فتح الخاص لكي نتمكن من إرسال التصميم لك!", ephemeral=True)
+                await interaction.followup.send("⚠️ خاصك مقفل! يرجى فتح الرسائل الخاصة (DMs) لكي نتمكن من إرسال الصور لك.", ephemeral=True)
         else:
             await interaction.followup.send("تعذر استرجاع الصور.", ephemeral=True)
 
@@ -204,11 +206,11 @@ async def fetch_images(urls: Sequence[str]) -> list[bytes]:
         )
 
 
-async def process_and_send(
-    user: discord.User | discord.Member,
-    channel_send_func: Callable[..., Awaitable[object]],
+async def send_result(
+    send_func: Callable[..., Awaitable[object]],
     image_data: Sequence[bytes],
     filenames: Sequence[str],
+    author_mention: str,
 ) -> None:
     for image_bytes in image_data:
         validate_image(image_bytes)
@@ -222,15 +224,12 @@ async def process_and_send(
     )
     view = PersistentResultButtons(original_pairs)
 
-    try:
-        await user.send(
-            content="🎨 **إليك تصميمك الجديد:**",
-            file=file_to_send,
-            view=view,
-        )
-        await channel_send_func(f"✅ {user.mention} تم إرسال التصميم النهائي إلى خاصك!")
-    except discord.Forbidden:
-        await channel_send_func(f"⚠️ {user.mention} يرجى فتح رسائلك الخاصة (DMs) لكي نرسل لك التصميم!")
+    # إرسال الصورة والزر مباشرة في الروم
+    await send_func(
+        content=f"**From:** {author_mention}",
+        file=file_to_send,
+        view=view,
+    )
 
 
 @bot.event
@@ -263,7 +262,7 @@ async def merge_images(ctx: commands.Context) -> None:
             safe_filename(attachment.filename, index)
             for index, attachment in enumerate(attachments, start=1)
         ]
-        await process_and_send(ctx.author, ctx.send, image_data, filenames)
+        await send_result(ctx.send, image_data, filenames, ctx.author.mention)
     except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
         logger.exception("Could not prepare the attached images: %s", error)
         await ctx.send("❌ تأكد من أن المرفقين صورتان صالحَتان.")
@@ -288,7 +287,7 @@ async def merge_slash(
             safe_filename(first.filename, 1),
             safe_filename(second.filename, 2),
         ]
-        await process_and_send(interaction.user, interaction.followup.send, image_data, filenames)
+        await send_result(interaction.followup.send, image_data, filenames, interaction.user.mention)
     except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
         logger.exception("Could not prepare slash-command images: %s", error)
         await interaction.followup.send(
