@@ -312,13 +312,13 @@ async def on_command_error(
 
 
 def main() -> None:
-    token = os.getenv("DISCORD_BOT_TOKEN")
+    token = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
     if not token:
         raise RuntimeError(
-            "DISCORD_BOT_TOKEN is not configured. Add it in Replit Secrets."
+            "DISCORD_TOKEN environment variable is not set!"
         )
     bot.run(token, log_handler=None)
 
 
-if __name__ == "__main__":text
+if __name__ == "__main__":
     main()
