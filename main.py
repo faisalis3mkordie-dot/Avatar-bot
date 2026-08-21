@@ -1,196 +1,324 @@
+import asyncio
 import io
+import logging
 import os
-from threading import Thread
+from pathlib import Path
+from typing import Awaitable, Callable, Sequence
+
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
-from discord.ui import Button, View
-from flask import Flask
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
-
-# --- 1. سيرفر Flask للبقاء أونلاين ---
-app = Flask('')
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 
-@app.route('/')
-def home():
-  return 'Bot Online'
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("merge-bot")
 
 
-def run():
-  app.run(host='0.0.0.0', port=8080)
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+tree_synced = False
 
 
-Thread(target=run).start()
+def safe_filename(original_name: str, index: int) -> str:
+    filename = Path(original_name).name
+    if not filename or "." not in filename:
+        return f"original-{index}.png"
+    return filename
 
-# --- 2. إعدادات البوت ---
-intents = discord.Intents.all()
+
+def read_image(image_bytes: bytes) -> Image.Image:
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        return ImageOps.exif_transpose(source).convert("RGBA")
 
 
-# --- 3. زر التفاعل الدائم ---
-class ProfileButtons(View):
+def validate_image(image_bytes: bytes) -> None:
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image.verify()
 
-  def __init__(self):
-    super().__init__(timeout=None)
 
-  @discord.ui.button(
-      emoji='📥',
-      style=discord.ButtonStyle.secondary,
-      custom_id='persistent_download_btn_v6',
-  )
-  async def download_btn(
-      self, interaction: discord.Interaction, button: Button
-  ):
-    await interaction.response.defer(ephemeral=True)
+def rounded_mask(size: tuple[int, int], radius: int) -> Image.Image:
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, size[0] - 1, size[1] - 1),
+        radius=radius,
+        fill=255,
+    )
+    return mask
 
-    # جلب رابطي الصورتين الأصليتين من الرسالة المرجعية (إذا كانت موجودة) أو البحث في آخر الرسائل
-    ref_msg = interaction.message.reference
-    target_msg = None
 
-    if ref_msg and ref_msg.message_id:
-      try:
-        target_msg = await interaction.channel.fetch_message(ref_msg.message_id)
-      except Exception:
-        pass
+def create_avatar_design(first_bytes: bytes, second_bytes: bytes) -> bytes:
+    """Create the Noir profile composition from two untouched source images."""
+    background_source = read_image(second_bytes)
+    portrait_source = read_image(first_bytes)
 
-    # إذا كانت الرسالة مسحوبة أو غير موجودة، نبحث عن أقرب رسالة فيها مرفقات قبل رسالة البوت
-    if not target_msg or len(target_msg.attachments) < 2:
-      async for msg in interaction.channel.history(
-          limit=10, before=interaction.message
-      ):
-        if len(msg.attachments) >= 2:
-          target_msg = msg
-          break
+    canvas_size = (1000, 615)
+    background = ImageOps.fit(
+        background_source,
+        canvas_size,
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
+    background = ImageEnhance.Brightness(background).enhance(0.48)
+    background = ImageEnhance.Contrast(background).enhance(1.05)
+    background = background.filter(ImageFilter.GaussianBlur(2.2))
 
-    if target_msg and len(target_msg.attachments) >= 2:
-      files = []
-      async with aiohttp.ClientSession() as session:
-        for idx, att in enumerate(target_msg.attachments[:2]):
-          async with session.get(att.url) as resp:
-            data = await resp.read()
-            files.append(
-                discord.File(
-                    fp=io.BytesIO(data), filename=f'original_{idx+1}.png'
-                )
+    canvas = background.copy()
+    canvas = Image.alpha_composite(
+        canvas,
+        Image.new("RGBA", canvas_size, (18, 21, 27, 72)),
+    )
+
+    panel_position = (48, 72)
+    panel_size = (905, 318)
+    panel = ImageOps.fit(
+        background_source,
+        panel_size,
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.45),
+    )
+    panel = ImageEnhance.Contrast(panel).enhance(1.04)
+    canvas.paste(
+        panel,
+        panel_position,
+        rounded_mask(panel_size, 50),
+    )
+    draw = ImageDraw.Draw(canvas)
+    panel_box = (
+        panel_position[0],
+        panel_position[1],
+        panel_position[0] + panel_size[0] - 1,
+        panel_position[1] + panel_size[1] - 1,
+    )
+    draw.rounded_rectangle(
+        panel_box,
+        radius=50,
+        outline=(71, 82, 111, 255),
+        width=8,
+    )
+
+    portrait_size = 310
+    portrait = ImageOps.fit(
+        portrait_source,
+        (portrait_size, portrait_size),
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
+    portrait_position = (101, 235)
+    shadow = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    shadow_mask = Image.new("L", (portrait_size, portrait_size), 0)
+    ImageDraw.Draw(shadow_mask).ellipse(
+        (0, 0, portrait_size - 1, portrait_size - 1),
+        fill=175,
+    )
+    shadow.paste(
+        (0, 0, 0, 255),
+        (portrait_position[0] + 12, portrait_position[1] + 16),
+        shadow_mask.filter(ImageFilter.GaussianBlur(12)),
+    )
+    canvas = Image.alpha_composite(canvas, shadow)
+
+    portrait_mask = Image.new("L", (portrait_size, portrait_size), 0)
+    ImageDraw.Draw(portrait_mask).ellipse(
+        (0, 0, portrait_size - 1, portrait_size - 1),
+        fill=255,
+    )
+    canvas.paste(portrait, portrait_position, portrait_mask)
+
+    circle_box = (
+        portrait_position[0],
+        portrait_position[1],
+        portrait_position[0] + portrait_size - 1,
+        portrait_position[1] + portrait_size - 1,
+    )
+    draw.ellipse(circle_box, outline=(71, 82, 111, 255), width=8)
+
+    output = io.BytesIO()
+    canvas.save(output, format="PNG")
+    return output.getvalue()
+
+
+class ResultButtons(discord.ui.View):
+    def __init__(
+        self,
+        image_bytes: bytes,
+        originals: Sequence[tuple[bytes, str]],
+    ):
+        super().__init__(timeout=None)
+        self.originals = list(originals)
+
+    @discord.ui.button(
+        label="⤓  تنزيل الصور",
+        style=discord.ButtonStyle.secondary,
+        custom_id="merge:download",
+    )
+    async def download(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        del button
+        await interaction.response.defer(ephemeral=True)
+        original_files = [
+            discord.File(io.BytesIO(image_bytes), filename=filename)
+            for image_bytes, filename in self.originals
+        ]
+        try:
+            await interaction.followup.send(
+                files=original_files,
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            logger.exception("Could not send original files from download button.")
+            await interaction.followup.send(
+                "تعذر إرسال الصور الأصلية. حاول الضغط مرة أخرى.",
+                ephemeral=True,
             )
 
-      await interaction.followup.send(
-          content='**صورك الأصلية:**', files=files, ephemeral=True
-      )
-    else:
-      await interaction.followup.send(
-          content='❌ تعذر العثور على الصور الأصلية.', ephemeral=True
-      )
+
+async def download_attachment(
+    session: aiohttp.ClientSession,
+    url: str,
+) -> bytes:
+    async with session.get(url) as response:
+        response.raise_for_status()
+        return await response.read()
 
 
-class PersistentBot(commands.Bot):
-
-  def __init__(self):
-    super().__init__(command_prefix='!', intents=intents)
-
-  async def setup_hook(self):
-    self.add_view(ProfileButtons())
-
-
-bot = PersistentBot()
+async def fetch_images(urls: Sequence[str]) -> list[bytes]:
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        return list(
+            await asyncio.gather(
+                *(download_attachment(session, url) for url in urls)
+            )
+        )
 
 
-# --- 4. دالة الرسم ---
-def create_matching_card(avatar_img, banner_img):
-  W, H = 850, 480
-  banner_w, banner_h = 730, 270
-  avatar_size = 220
+async def send_result(
+    send: Callable[..., Awaitable[object]],
+    image_data: Sequence[bytes],
+    filenames: Sequence[str],
+    author_mention: str,
+) -> None:
+    for image_bytes in image_data:
+        validate_image(image_bytes)
 
-  bg = ImageOps.fit(banner_img, (W, H), Image.Resampling.LANCZOS)
-  dark_overlay = Image.new('RGBA', (W, H), (8, 10, 14, 180))
-  bg.paste(dark_overlay, (0, 0), dark_overlay)
-
-  banner_crop = ImageOps.fit(
-      banner_img, (banner_w, banner_h), Image.Resampling.LANCZOS
-  )
-  banner_x, banner_y = 60, 40
-
-  banner_mask = Image.new('L', (banner_w, banner_h), 0)
-  draw_bm = ImageDraw.Draw(banner_mask)
-  draw_bm.rounded_rectangle((0, 0, banner_w, banner_h), radius=35, fill=255)
-
-  bg.paste(banner_crop, (banner_x, banner_y), banner_mask)
-
-  draw_bg = ImageDraw.Draw(bg)
-  draw_bg.rounded_rectangle(
-      (banner_x - 2, banner_y - 2, banner_x + banner_w + 2, banner_y + banner_h + 2),
-      outline=(120, 145, 175, 220),
-      width=3,
-      radius=35,
-  )
-
-  avatar_crop = ImageOps.fit(
-      avatar_img, (avatar_size, avatar_size), Image.Resampling.LANCZOS
-  )
-  avatar_x = 110
-  avatar_y = (banner_y + banner_h) - (avatar_size // 2)
-
-  circle_mask = Image.new('L', (avatar_size, avatar_size), 0)
-  draw_cm = ImageDraw.Draw(circle_mask)
-  draw_cm.ellipse((0, 0, avatar_size, avatar_size), fill=255)
-
-  bg.paste(avatar_crop, (avatar_x, avatar_y), circle_mask)
-
-  draw_bg.ellipse(
-      (
-          avatar_x - 3,
-          avatar_y - 3,
-          avatar_x + avatar_size + 3,
-          avatar_y + avatar_size + 3,
-      ),
-      outline=(140, 165, 195, 240),
-      width=4,
-  )
-
-  return bg
+    original_pairs = list(zip(image_data, filenames, strict=True))
+    final_bytes = create_avatar_design(image_data[0], image_data[1])
+    await send(
+        content=f"**From:** {author_mention}",
+        file=discord.File(
+            io.BytesIO(final_bytes),
+            filename="noir-avatar.png",
+        ),
+        view=ResultButtons(final_bytes, original_pairs),
+    )
 
 
-# --- 5. استقبال وتجهيز الرسائل ---
 @bot.event
-async def on_message(message):
-  if message.author.bot:
-    return
-
-  is_command = message.content.startswith('!merge')
-  is_mentioned = bot.user in message.mentions
-
-  if is_command or is_mentioned:
-    target_attachments = message.attachments
-
-    if len(target_attachments) < 2:
-      async for msg in message.channel.history(limit=5):
-        if len(msg.attachments) >= 2 and msg.author.id != bot.user.id:
-          target_attachments = msg.attachments
-          break
-
-    if len(target_attachments) >= 2:
-      async with aiohttp.ClientSession() as session:
-        async with session.get(target_attachments[0].url) as resp1:
-          avatar_data = await resp1.read()
-        async with session.get(target_attachments[1].url) as resp2:
-          banner_data = await resp2.read()
-
-      avatar_img = Image.open(io.BytesIO(avatar_data)).convert('RGBA')
-      banner_img = Image.open(io.BytesIO(banner_data)).convert('RGBA')
-
-      final_card = create_matching_card(avatar_img, banner_img)
-
-      output_buffer = io.BytesIO()
-      final_card.save(output_buffer, format='PNG')
-      output_buffer.seek(0)
-
-      # إرسال الصورة المصممة فقط بدون حذف رسالة المستخدم
-      await message.channel.send(
-          content=f'**From:** {message.author.mention}',
-          file=discord.File(fp=output_buffer, filename='matching_profile.png'),
-          view=ProfileButtons(),
-          reference=message,
-      )
+async def on_ready() -> None:
+    global tree_synced
+    if not tree_synced:
+        await bot.tree.sync()
+        tree_synced = True
+    if bot.user:
+        logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
 
 
-bot.run(os.getenv('BOT_TOKEN'))
+@bot.command(name="merge", aliases=["دمج"])
+async def merge_images(ctx: commands.Context) -> None:
+    if len(ctx.message.attachments) < 2:
+        await ctx.send(
+            "❌ يرجى إرفاق **صورتين** مع الأمر!",
+            delete_after=5,
+        )
+        return
+
+    attachments = ctx.message.attachments[:2]
+    try:
+        image_data = await fetch_images([attachment.url for attachment in attachments])
+
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+        filenames = [
+            safe_filename(attachment.filename, index)
+            for index, attachment in enumerate(attachments, start=1)
+        ]
+        await send_result(
+            ctx.send,
+            image_data,
+            filenames,
+            ctx.author.mention,
+        )
+    except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
+        logger.exception("Could not prepare the attached images: %s", error)
+        await ctx.send("❌ تأكد من أن المرفقين صورتان صالحَتان.")
+    except discord.HTTPException:
+        logger.exception("Could not send the merge result to Discord.")
+
+
+@bot.tree.command(name="merge", description="إنشاء تصميم من صورتين")
+@app_commands.describe(
+    first="الصورة الأولى، ستظهر كعنصر دائري",
+    second="الصورة الثانية، ستكون خلفية التصميم",
+)
+async def merge_slash(
+    interaction: discord.Interaction,
+    first: discord.Attachment,
+    second: discord.Attachment,
+) -> None:
+    await interaction.response.defer()
+    try:
+        image_data = await fetch_images([first.url, second.url])
+        filenames = [
+            safe_filename(first.filename, 1),
+            safe_filename(second.filename, 2),
+        ]
+        await send_result(
+            interaction.followup.send,
+            image_data,
+            filenames,
+            interaction.user.mention,
+        )
+    except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
+        logger.exception("Could not prepare slash-command images: %s", error)
+        await interaction.followup.send(
+            "❌ تأكد من أن المرفقين صورتان صالحَتان.",
+            ephemeral=True,
+        )
+    except discord.HTTPException:
+        logger.exception("Could not send the slash-command result to Discord.")
+
+
+@bot.event
+async def on_command_error(
+    ctx: commands.Context,
+    error: commands.CommandError,
+) -> None:
+    if isinstance(error, commands.CommandNotFound):
+        return
+    logger.exception("Unhandled command error: %s", error)
+
+
+def main() -> None:
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "DISCORD_BOT_TOKEN is not configured. Add it in Replit Secrets."
+        )
+    bot.run(token, log_handler=None)
+
+
+if __name__ == "__main__":text
+    main()
