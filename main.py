@@ -24,7 +24,6 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-tree_synced = False
 
 
 def safe_filename(original_name: str, index: int) -> str:
@@ -145,19 +144,15 @@ def create_avatar_design(first_bytes: bytes, second_bytes: bytes) -> bytes:
     return output.getvalue()
 
 
-class ResultButtons(discord.ui.View):
-    def __init__(
-        self,
-        image_bytes: bytes,
-        originals: Sequence[tuple[bytes, str]],
-    ):
+class PersistentResultButtons(discord.ui.View):
+    def __init__(self, originals: Sequence[tuple[bytes, str]] = None):
         super().__init__(timeout=None)
-        self.originals = list(originals)
+        self.originals = list(originals) if originals else []
 
     @discord.ui.button(
-        label="⤓  تنزيل الصور",
+        label="⤓  تنزيل الصور الأصلية",
         style=discord.ButtonStyle.secondary,
-        custom_id="merge:download",
+        custom_id="merge:persistent_download",
     )
     async def download(
         self,
@@ -166,21 +161,28 @@ class ResultButtons(discord.ui.View):
     ) -> None:
         del button
         await interaction.response.defer(ephemeral=True)
-        original_files = [
-            discord.File(io.BytesIO(image_bytes), filename=filename)
-            for image_bytes, filename in self.originals
-        ]
-        try:
-            await interaction.followup.send(
-                files=original_files,
-                ephemeral=True,
-            )
-        except discord.HTTPException:
-            logger.exception("Could not send original files from download button.")
-            await interaction.followup.send(
-                "تعذر إرسال الصور الأصلية. حاول الضغط مرة أخرى.",
-                ephemeral=True,
-            )
+
+        if self.originals:
+            files = [
+                discord.File(io.BytesIO(img_bytes), filename=fname)
+                for img_bytes, fname in self.originals
+            ]
+            try:
+                await interaction.user.send("📂 هذه هي الصور الأصلية التي استخدمتها:", files=files)
+                await interaction.followup.send("✅ تم إرسال الصور الأصلية إلى خاصك!", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.followup.send("⚠️ تعذر إرسال الصور! يرجى فتح الرسائل الخاصة (DMs) أولاً.", ephemeral=True)
+            return
+
+        if interaction.message and interaction.message.attachments:
+            result_file = await interaction.message.attachments[0].to_file()
+            try:
+                await interaction.user.send("🎨 تصميمك المحفوظ:", file=result_file)
+                await interaction.followup.send("✅ تم إرسال تصميمك في الخاص!", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.followup.send("⚠️ يرجى فتح الخاص لكي نتمكن من إرسال التصميم لك!", ephemeral=True)
+        else:
+            await interaction.followup.send("تعذر استرجاع الصور.", ephemeral=True)
 
 
 async def download_attachment(
@@ -202,33 +204,39 @@ async def fetch_images(urls: Sequence[str]) -> list[bytes]:
         )
 
 
-async def send_result(
-    send: Callable[..., Awaitable[object]],
+async def process_and_send(
+    user: discord.User | discord.Member,
+    channel_send_func: Callable[..., Awaitable[object]],
     image_data: Sequence[bytes],
     filenames: Sequence[str],
-    author_mention: str,
 ) -> None:
     for image_bytes in image_data:
         validate_image(image_bytes)
 
     original_pairs = list(zip(image_data, filenames, strict=True))
     final_bytes = create_avatar_design(image_data[0], image_data[1])
-    await send(
-        content=f"**From:** {author_mention}",
-        file=discord.File(
-            io.BytesIO(final_bytes),
-            filename="noir-avatar.png",
-        ),
-        view=ResultButtons(final_bytes, original_pairs),
+    
+    file_to_send = discord.File(
+        io.BytesIO(final_bytes),
+        filename="noir-avatar.png",
     )
+    view = PersistentResultButtons(original_pairs)
+
+    try:
+        await user.send(
+            content="🎨 **إليك تصميمك الجديد:**",
+            file=file_to_send,
+            view=view,
+        )
+        await channel_send_func(f"✅ {user.mention} تم إرسال التصميم النهائي إلى خاصك!")
+    except discord.Forbidden:
+        await channel_send_func(f"⚠️ {user.mention} يرجى فتح رسائلك الخاصة (DMs) لكي نرسل لك التصميم!")
 
 
 @bot.event
 async def on_ready() -> None:
-    global tree_synced
-    if not tree_synced:
-        await bot.tree.sync()
-        tree_synced = True
+    bot.add_view(PersistentResultButtons())
+    await bot.tree.sync()
     if bot.user:
         logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
 
@@ -255,12 +263,7 @@ async def merge_images(ctx: commands.Context) -> None:
             safe_filename(attachment.filename, index)
             for index, attachment in enumerate(attachments, start=1)
         ]
-        await send_result(
-            ctx.send,
-            image_data,
-            filenames,
-            ctx.author.mention,
-        )
+        await process_and_send(ctx.author, ctx.send, image_data, filenames)
     except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
         logger.exception("Could not prepare the attached images: %s", error)
         await ctx.send("❌ تأكد من أن المرفقين صورتان صالحَتان.")
@@ -285,12 +288,7 @@ async def merge_slash(
             safe_filename(first.filename, 1),
             safe_filename(second.filename, 2),
         ]
-        await send_result(
-            interaction.followup.send,
-            image_data,
-            filenames,
-            interaction.user.mention,
-        )
+        await process_and_send(interaction.user, interaction.followup.send, image_data, filenames)
     except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
         logger.exception("Could not prepare slash-command images: %s", error)
         await interaction.followup.send(
