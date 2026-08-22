@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ from discord.ext import commands
 from flask import Flask
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
-# --- 1. سيرفر Flask لتفادي مشكلة Port في Render ---
+# --- 1. سيرفر Flask لتفادي مشكلة Port في Render / Replit ---
 app = Flask('')
 
 
@@ -165,64 +166,75 @@ def create_avatar_design(first_bytes: bytes, second_bytes: bytes) -> bytes:
   return output.getvalue()
 
 
-# زر يدعم الترسيت ويرسل الصور الأصلية مباشرة عبر إعادة تحميل المرفقات الأصلية
-class PersistentResultButtons(discord.ui.View):
+class DownloadButton(discord.ui.Button):
 
-  def __init__(self, original_files: Sequence[discord.File] = None):
-    super().__init__(timeout=None)
+  def __init__(self, urls: list[str] = None):
+    custom_id = 'merge:dl_btn'
+    if urls:
+      # تخزين الروابط داخل custom_id ليقرأها البوت بعد إعادة التشغيل
+      data_str = json.dumps(urls)
+      custom_id = f'merge:dl:{data_str}'
 
-  @discord.ui.button(
-      label='⤓  تنزيل الصور',
-      style=discord.ButtonStyle.secondary,
-      custom_id='merge:persistent_download',
-  )
-  async def download(
-      self,
-      interaction: discord.Interaction,
-      button: discord.ui.Button,
-  ) -> None:
-    del button
+    super().__init__(
+        label='⤓  تنزيل الصور',
+        style=discord.ButtonStyle.secondary,
+        custom_id=custom_id[:100],  # حد أقصى للـ custom_id في ديسكورد
+    )
+
+  async def callback(self, interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
-    if interaction.message and interaction.message.attachments:
+    urls = []
+    if self.custom_id.startswith('merge:dl:'):
+      try:
+        urls = json.loads(self.custom_id[9:])
+      except Exception:
+        pass
+
+    if not urls and interaction.message and interaction.message.attachments:
+      urls = [att.url for att.url in interaction.message.attachments]
+
+    if urls:
       try:
         files_to_send = []
         async with aiohttp.ClientSession() as session:
-          for attachment in interaction.message.attachments:
-            async with session.get(attachment.url) as resp:
+          for idx, url in enumerate(urls, start=1):
+            async with session.get(url) as resp:
               if resp.status == 200:
-                img_data = await resp.read()
+                data = await resp.read()
                 files_to_send.append(
-                    discord.File(
-                        io.BytesIO(img_data), filename=attachment.filename
-                    )
+                    discord.File(io.BytesIO(data), filename=f'original-{idx}.png')
                 )
 
-        if len(files_to_send) > 1:
-          # يرسل الصور الأصلية فقط للخاص (المرفق الأول هو التصميم، وبقية المرفقات هي الأصلية)
+        if files_to_send:
           await interaction.user.send(
-              '📂 هذه هي الصور الأصلية والصور المدمجة:',
-              files=files_to_send[1:],
+              '📂 هذه هي الصور الأصلية:', files=files_to_send
+          )
+          await interaction.followup.send(
+              '✅ تم إرسال الصور الأصلية إلى خاصك!', ephemeral=True
           )
         else:
-          await interaction.user.send(
-              '🎨 التصميم المحفوظ:', files=[files_to_send[0]]
+          await interaction.followup.send(
+              'تعذر تحميل الصور.', ephemeral=True
           )
-
-        await interaction.followup.send(
-            '✅ تم إرسال الصور الأصلية إلى خاصك!', ephemeral=True
-        )
       except discord.Forbidden:
         await interaction.followup.send(
-            '⚠️ خاصك مقفل! يرجى فتح الخاص لكي نرسل لك الصور.', ephemeral=True
+            '⚠️ خاصك مقفل! يرجى فتح الرسائل الخاصة.', ephemeral=True
         )
       except Exception as e:
-        logger.exception('Error downloading attachments: %s', e)
+        logger.exception('Error downloading images: %s', e)
         await interaction.followup.send(
-            'حدث خطأ أثناء استرجاع الصور.', ephemeral=True
+            'حدث خطأ أثناء تنزيل الصور.', ephemeral=True
         )
     else:
       await interaction.followup.send('تعذر استرجاع الصور.', ephemeral=True)
+
+
+class PersistentResultButtons(discord.ui.View):
+
+  def __init__(self, urls: list[str] = None):
+    super().__init__(timeout=None)
+    self.add_item(DownloadButton(urls))
 
 
 async def download_attachment(
@@ -249,24 +261,22 @@ async def send_result(
     image_data: Sequence[bytes],
     filenames: Sequence[str],
     author_mention: str,
+    original_urls: list[str],
 ) -> None:
   for image_bytes in image_data:
     validate_image(image_bytes)
 
   final_bytes = create_avatar_design(image_data[0], image_data[1])
 
-  # نقوم بإرفاق التصميم النهائي + الصور الأصلية مع الرسالة بنفس الوقت (تكون محفوظة في ديسكورد للترسيت)
-  files_to_upload = [
-      discord.File(io.BytesIO(final_bytes), filename='noir-avatar.png'),
-      discord.File(io.BytesIO(image_data[0]), filename=filenames[0]),
-      discord.File(io.BytesIO(image_data[1]), filename=filenames[1]),
-  ]
-
-  view = PersistentResultButtons()
+  # إرسال الصورة المدمجة فقط في السيرفر
+  file_to_send = discord.File(
+      io.BytesIO(final_bytes), filename='noir-avatar.png'
+  )
+  view = PersistentResultButtons(original_urls)
 
   await send_func(
       content=f'**From:** {author_mention}',
-      files=files_to_upload,
+      file=file_to_send,
       view=view,
   )
 
@@ -289,10 +299,9 @@ async def merge_images(ctx: commands.Context) -> None:
     return
 
   attachments = ctx.message.attachments[:2]
+  urls = [att.url for att in attachments]
   try:
-    image_data = await fetch_images(
-        [attachment.url for attachment in attachments]
-    )
+    image_data = await fetch_images(urls)
 
     try:
       await ctx.message.delete()
@@ -303,7 +312,9 @@ async def merge_images(ctx: commands.Context) -> None:
         safe_filename(attachment.filename, index)
         for index, attachment in enumerate(attachments, start=1)
     ]
-    await send_result(ctx.send, image_data, filenames, ctx.author.mention)
+    await send_result(
+        ctx.send, image_data, filenames, ctx.author.mention, urls
+    )
   except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
     logger.exception('Could not prepare the attached images: %s', error)
     await ctx.send('❌ تأكد من أن المرفقين صورتان صالحَتان.')
@@ -322,8 +333,9 @@ async def merge_slash(
     second: discord.Attachment,
 ) -> None:
   await interaction.response.defer()
+  urls = [first.url, second.url]
   try:
-    image_data = await fetch_images([first.url, second.url])
+    image_data = await fetch_images(urls)
     filenames = [
         safe_filename(first.filename, 1),
         safe_filename(second.filename, 2),
@@ -333,6 +345,7 @@ async def merge_slash(
         image_data,
         filenames,
         interaction.user.mention,
+        urls,
     )
   except (aiohttp.ClientError, OSError, ValueError, IndexError) as error:
     logger.exception('Could not prepare slash-command images: %s', error)
